@@ -1,5 +1,5 @@
 # Word-Predictor-For-Smart-Devices
-Project in Natural Language Processing
+Project in Natural Language Processing.
 
 This project uses the files named LOCALE.blogs.txt where LOCALE is the each of the four locales and their languages into English (en_US dataset), German (de_DE dataset), Russian (ru_RU dataset) and Finnish (fi_FI dataset). In this capstone, we will be applying data science in building a predictive model in the area of natural language processing.
 
