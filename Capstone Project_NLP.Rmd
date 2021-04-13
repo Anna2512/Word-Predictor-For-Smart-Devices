@@ -1,0 +1,774 @@
+---
+title: "Word Predictor for Smart Devices in Natural Language Processing"
+author: "Anna Huynh"
+date: "4/6/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE)
+```
+
+## Synopsis
+
+This project uses the files named LOCALE.blogs.txt where LOCALE is the each of the four locales and their languages into English (en_US dataset), German (de_DE dataset), Russian (ru_RU dataset) and Finnish (fi_FI dataset). In this capstone, we will be applying data science in building a predictive model in the area of natural language processing.
+
+In the final report, we're going to present an overview of data throughout Exploratory Data Analysis (EDA), predictive algorithm and our plan to bring up a Shiny App for data interaction. There are 02 parts to be introduced:
+
+**Part I: Exploratory Data Analysis**
+An overview of data will be illustrated into statistical tables and data visualization.
+
+**Dataset:**
+- Using data provided by SwiftKey, we built up the final dataset extracted from the English corpus as a subset of each 1% of the news, blogs, and twitter and then combined them to ensure equal representation and ease of calculation. The binomial distribution will be used to sample the data and remove bias in the sampling process.
+- The dataset was split into 80% training, 10% validation and 10% test set.
+
+**Data Transformation:**
+1. Word Stemming: 
+ - Help reducing inflected or derived word to its basic part.
+2. All text to lower case:
+ - Removes the problem of beginning of sentence words being “different” than the others.
+ - Combined with punctuation, this information could be used for prediction.
+ - Ignore capital letters in the beginning of sentence, but keep them elsewhere to catch names and acronyms correctly.
+3. Remove numbers: 
+ - Remove tokens that consist only of numbers, but not words that start with digits),
+4. Remove punctuation
+5. Remove separators:
+ - Spaces and variations of spaces, plus tab, newlines, and anything else in the Unicode “separator” category.
+6. Remove Twitter characters
+7. Profanity filtering
+
+**Part II: Algorithm For Shiny App**
+Link to Shiny App: <https://rpubs.com/Anna_Huynh/753061>
+
+**Algorithm works following designed flow:**
+- First the function to predict the fourth word (quad-gram), given three previous words.
+- If failed at the 1st round of running, return probable word given two successive words.
+- If it didn't find a tri-gram with the two given words, algorithm being allowed to back-off to the bi-gram and find the next word given one previous word.
+- If it couldn't even find the corresponding bi-gram, we randomly get a word from uni-grams with high probability. This is the last resort for n-grams that are not found in the sampling dataset.
+
+
+------------------------------------------------------------------------------------
+
+```{r, echo=FALSE, warning=FALSE}
+library(qdap)
+library(tm)
+library(SnowballC)
+library(slam)
+library(RWeka)
+library(ggplot2)
+library(quanteda)
+library(dplyr)
+library(data.table)
+library(corpus)
+library(tidytext)
+library(wordcloud)
+library(reshape2)
+
+```
+
+## Part I: Data Exploration 
+
+We started with data loading from corpus of US Blog, US News, and US Twitter.
+
+```{r, warning=FALSE}
+blogs <- readLines("C:/Users/Anhuynh/Desktop/Data Science_Cousera/Data Science Capstone/Assignment/final/en_US/en_US.blogs.txt",skipNul = TRUE,encoding = "UTF-8")
+blog_size <- file.info("en_US.blogs.txt")$size / 1024 ^ 2 ## FILE SIZE IN MB
+length(blogs)
+
+summary(nchar(blogs))
+
+```
+
+```{r, warning=FALSE}
+news <- readLines("C:/Users/Anhuynh/Desktop/Data Science_Cousera/Data Science Capstone/Assignment/final/en_US/en_US.news.txt",skipNul = TRUE,encoding = "UTF-8")
+blog_size <- file.info("en_US.news.txt")$size / 1024 ^ 2 ## FILE SIZE IN MB
+length(news)
+
+summary(nchar(news))
+
+```
+
+```{r, warning=FALSE}
+twitter <- readLines("C:/Users/Anhuynh/Desktop/Data Science_Cousera/Data Science Capstone/Assignment/final/en_US/en_US.twitter.txt",skipNul = TRUE,encoding = "UTF-8")
+blog_size <- file.info("en_US.twitter.txt")$size / 1024 ^ 2 ## FILE SIZE IN MB
+length(twitter)
+
+summary(nchar(twitter))
+
+```
+
+### Sampling
+
+We create the final data set for the corpus, we subset 1% of the news,blogs, and the twitter data sets and combine them to ensure equal representation and ease of calculation. The binomial distribution will be used to sample the data and remove bias in the sampling process.
+
+```{r}
+set.seed(2021)
+twitter_sample<- twitter[rbinom(length(twitter)*.01, length(twitter), .5)]
+news_sample<- news[rbinom(length(news)*.01, length(news), .5)]
+blogs_sample<- blogs[rbinom(length(blogs)*.01, length(blogs), .5)]
+sampled <- c(twitter_sample,news_sample,blogs_sample)
+
+```
+
+```{r}
+write(twitter_sample, file = "en_US/sample_data/twitter_sample.txt")
+write(blogs_sample, file = "en_US/sample_data/blogs_sample.txt")
+write(news_sample, file = "en_US/sample_data/news_sample.txt")
+
+```
+
+### We will now create a corpus from the sampled data.
+
+```{r}
+corpus <- Corpus(DirSource("C:/Users/Anhuynh/Desktop/Data Science_Cousera/Data Science Capstone/Assignment/final/en_US/sample_data"), readerControl = list(language="en_US"))
+summary(corpus)
+
+```
+
+### Text Statistics
+
+```{r}
+stats <- text_stats(corpus)
+print(stats, -1) # print all rows instead of truncating at 20
+
+```
+
+#### Testing Heaps’ law
+Heaps’ law says that the logarithm of the number of unique types is a linear function of the number of tokens. We can test this law formally with a regression analysis.
+
+```{r}
+model <- lm(log(types) ~ log(tokens), stats)
+summary(model)
+
+```
+
+```{r}
+# en_US.blogs sample
+con_blog <- file("C:/Users/Anhuynh/Desktop/Data Science_Cousera/Data Science Capstone/Assignment/final/en_US/sample_data/blogs_sample.txt", "r")
+
+text_blog <- data.frame(text= readLines(con_blog), stringsAsFactors = FALSE)
+text_df_blog <- tibble(line = seq_along(text_blog), text = text_blog)
+blog <- mutate(text_df_blog, text = text_blog$text)
+
+tidy_blog <- blog%>%
+  unnest_tokens(word, text)
+
+# en_US.news sample
+con_news <- file("C:/Users/Anhuynh/Desktop/Data Science_Cousera/Data Science Capstone/Assignment/final/en_US/sample_data/news_sample.txt", "r")
+
+text_news <- data.frame(text= readLines(con_news), stringsAsFactors = FALSE)
+text_df_news <- tibble(line = seq_along(text_news), text = text_news)
+news <- mutate(text_df_news, text = text_news$text)
+
+tidy_news <- news %>%
+  unnest_tokens(word, text)
+
+# en_US.twitter sample
+con_twitter <- file("C:/Users/Anhuynh/Desktop/Data Science_Cousera/Data Science Capstone/Assignment/final/en_US/sample_data/twitter_sample.txt", "r")
+
+text_tw <- data.frame(text= readLines(con_twitter), stringsAsFactors = FALSE)
+text_df_tw <- tibble(line = seq_along(text_tw), text = text_tw)
+tw <- mutate(text_df_tw, text = text_tw$text)
+
+tidy_tw <- tw %>%
+  unnest_tokens(word, text)
+
+fin_corpus <- rbind(tidy_blog, tidy_news, tidy_tw)
+
+```
+
+```{r}
+bing_word_counts <- fin_corpus %>%
+  inner_join(get_sentiments("bing")) %>%
+  count(word, sentiment, sort = TRUE) %>%
+  ungroup()
+
+bing_word_counts %>%
+  group_by(sentiment) %>%
+  top_n(10) %>%
+  ungroup() %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(n, word, fill = sentiment)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~sentiment, scales = "free_y") +
+  labs(x = "Contribution to sentiment",
+       y = NULL)
+
+```
+
+
+```{r}
+fin_corpus %>%
+  inner_join(get_sentiments("bing")) %>%
+  count(word, sentiment, sort = TRUE) %>%
+  acast(word ~ sentiment, value.var = "n", fill = 0) %>%
+  comparison.cloud(colors = c("gray20", "gray80"),
+                   max.words = 100)
+
+```
+
+
+```{r, echo=FALSE, warning=FALSE}
+library(syuzhet)
+library(stringr)
+library(viridis)
+library(ggthemes)
+```
+
+
+```{r}
+
+fin_corpus <- character()
+for (i in seq_along(corpus)) {
+        if (i%%2 == 1) fin_corpus[ceiling(i/2)] <- str_c(corpus[i], 
+                                                      corpus[i+1],
+                                                      sep = " ")
+}
+fin_corpus_nrc <- cbind(linenumber = seq_along(fin_corpus),
+                           get_nrc_sentiment(fin_corpus))
+
+cor_emotions <- fin_corpus_nrc %>% select(linenumber, anger, anticipation, 
+                                      disgust, fear, joy, sadness, surprise, 
+                                      trust) %>% 
+        melt(id = c("linenumber"))
+names(cor_emotions) <- c("linenumber", "sentiment", "value")
+
+levels(cor_emotions$sentiment) <- c("Anger", "Anticipation", "Disgust", "Fear", 
+                                "Joy", "Sadness", "Surprise", "Trust")
+cor_emotions$sentiment = factor(cor_emotions$sentiment,levels(cor_emotions$sentiment)[c(5,8,2,7,6,3,4,1)])
+
+
+ggplot(data = cor_emotions, aes(x = linenumber, y = sentiment, fill = value)) +
+        geom_tile(color="white", size=0.1) +
+        scale_fill_viridis(name="Sentiment\nScore") +
+        coord_equal() + theme_tufte(base_family="Helvetica") + 
+        labs(x=NULL, y=NULL, 
+             title=expression(paste("Sentiment in ", italic("en_US Samples")))) +
+        theme(axis.ticks=element_blank(), axis.text.x=element_blank()) +
+        scale_x_discrete(expand=c(0,0)) +
+        theme(axis.text=element_text(size=6)) +
+        theme(panel.border=element_blank()) +
+        theme(legend.title=element_text(size=6)) + 
+        theme(legend.title.align=1) + 
+        theme(legend.text=element_text(size=6)) + 
+        theme(legend.position="bottom") + 
+        theme(legend.key.size=unit(0.2, "cm")) + 
+        theme(legend.key.width=unit(1, "cm"))
+
+
+```
+
+
+### Tokenization and Cleaning
+
+
+```{r}
+combined <- c(twitter_sample,blogs_sample,news_sample)
+corp <- corpus(combined)
+# Clean tokens
+tokens <- tokens(
+    x = tolower(corp),
+    remove_punct = TRUE,
+    remove_twitter = TRUE,
+    remove_numbers = TRUE,
+    remove_hyphens = TRUE,
+    remove_symbols = TRUE,
+    remove_url = TRUE
+    )
+tokens <- tokens_select(tokens, pattern = stopwords("en"),padding = FALSE)
+
+stem_words <- tokens_wordstem(tokens, language = "english")
+
+```
+
+### N-gram model
+
+```{r}
+bigram <- tokens_ngrams(stem_words, n = 2)
+trigram <- tokens_ngrams(stem_words, n = 3)
+fourgram <- tokens_ngrams(stem_words, n = 4)
+
+unigram_dfm <- dfm(stem_words)
+bigram_dfm <- dfm(bigram)
+trigram_dfm <- dfm(trigram)
+fourgram_dfm <- dfm(fourgram)
+
+```
+
+We trim the models for by frequency threshhold.
+
+```{r}
+trimmed_uni <- dfm_trim(unigram_dfm,4)
+trimmed_bi <- dfm_trim(bigram_dfm,4)
+trimmed_tri <- dfm_trim(trigram_dfm,4)
+trimmed_quad <- dfm_trim(fourgram_dfm,4)
+
+```
+
+We generate the word counts.
+
+```{r}
+sums_uni <- colSums(trimmed_uni)
+sums_bi <- colSums(trimmed_bi)
+sums_tri <- colSums(trimmed_tri)
+sums_quad <- colSums(trimmed_quad)
+
+```
+
+We create a data table with each individual words as columns.
+
+```{r}
+unigram_words <- data.table(word_1 = names(sums_uni), count = sums_uni)
+
+bigram_words <- data.table(
+        word_1 = sapply(strsplit(names(sums_bi), "_", fixed = TRUE), '[[', 1),
+        word_2 = sapply(strsplit(names(sums_bi), "_", fixed = TRUE), '[[', 2),
+        count = sums_bi)
+
+trigram_words <- data.table(
+        word_1 = sapply(strsplit(names(sums_tri), "_", fixed = TRUE), '[[', 1),
+        word_2 = sapply(strsplit(names(sums_tri), "_", fixed = TRUE), '[[', 2),
+        word_3 = sapply(strsplit(names(sums_tri), "_", fixed = TRUE), '[[', 3),
+        count = sums_tri)
+
+
+quadgram_words <- data.table(
+        word_1 = sapply(strsplit(names(sums_quad), "_", fixed = TRUE), '[[', 1),
+        word_2 = sapply(strsplit(names(sums_quad), "_", fixed = TRUE), '[[', 2),
+        word_3 = sapply(strsplit(names(sums_quad), "_", fixed = TRUE), '[[', 3),
+        word_4 = sapply(strsplit(names(sums_quad), "_", fixed = TRUE), '[[', 4),
+        count = sums_quad)
+
+```
+
+
+```{r}
+## de-select unexpected tokens
+unigram_words <- unigram_words %>%
+  filter(!word_1 %in% c("the", "a", "an"))  
+
+bigram_words <- bigram_words %>%
+  filter(!word_1 %in% c("the", "a", "an")) %>%
+    filter(!word_2 %in% c("the", "a", "an"))
+    
+trigram_words <- trigram_words %>%
+  filter(!word_1 %in% c("the", "a", "an")) %>%
+    filter(!word_2 %in% c("the", "a", "an")) %>%
+    filter(!word_3 %in% c("the", "a", "an"))
+
+quadgram_words <- quadgram_words %>%
+  filter(!word_1 %in% c("the", "a", "an")) %>%
+    filter(!word_2 %in% c("the", "a", "an")) %>%
+    filter(!word_3 %in% c("the", "a", "an")) %>%
+    filter(!word_4 %in% c("the", "a", "an"))
+
+```
+
+
+```{r}
+graph_uni <- unigram_words[order(unigram_words$count,decreasing = TRUE),]
+graph_uni <- graph_uni[1:25,]
+graph_uni$word_1 <- factor(graph_uni$word_1,levels = graph_uni$word_1)
+t <- ggplot(graph_uni, aes(x = word_1, y = count))
+ t <- t + geom_bar(stat = "identity") + coord_flip() + 
+   labs(title = "Most Frequent words")
+ t
+
+```
+
+```{r}
+graph_bi <- bigram_words[order(bigram_words$count,decreasing = TRUE),]
+graph_bi <- graph_bi[1:25,]
+graph_bi$word <- paste(graph_bi$word_1,graph_bi$word_2)
+graph_bi$word <- factor(graph_bi$word, levels = graph_bi$word)
+
+tt <- ggplot(graph_bi, aes(x = word, y = count))
+ tt <- tt + geom_bar(stat = "identity") + coord_flip() + 
+   labs(title = "Most Frequent bigram phrases")
+ tt
+
+```
+
+```{r}
+graph_tri <- trigram_words[order(trigram_words$count,decreasing = TRUE),]
+graph_tri <- graph_tri[1:25,]
+graph_tri$word <- paste(graph_tri$word_1,graph_tri$word_2,graph_tri$word_3)
+graph_tri$word <- factor(graph_tri$word, levels = graph_tri$word)
+
+ttt <- ggplot(graph_tri, aes(x = word, y = count))
+ ttt <- ttt + geom_bar(stat = "identity") + coord_flip() + 
+   labs(title = "Most Frequent trigram phrases")
+ ttt
+
+```
+
+```{r}
+graph_quad <- quadgram_words[order(quadgram_words$count,decreasing = TRUE),]
+graph_quad <- graph_quad[1:25,]
+graph_quad$word <- paste(graph_quad$word_1,graph_quad$word_2,graph_quad$word_3,graph_quad$word_4)
+graph_quad$word <- factor(graph_quad$word, levels = graph_quad$word)
+
+tttt <- ggplot(graph_quad, aes(x = word, y = count))
+ tttt <- tttt + geom_bar(stat = "identity") + coord_flip() + 
+   labs(title = "Most Frequent quadgram phrases")
+ tttt
+
+```
+
+
+## Part II: Predictive Algorithm For Shiny App
+
+### N-Gram Probabilities
+
+After exploring the data, we will now create a shiny app to use these n-gram models to predict the next word in a phrase or sentence.
+
+```{r}
+setkey(unigram_words, word_1)
+setkey(bigram_words, word_1, word_2)
+setkey(trigram_words, word_1, word_2, word_3)
+setkey(quadgram_words, word_1, word_2, word_3,word_4)
+
+```
+
+We will use the Kneser-Ney smoothing to calculate for the n-gram probabilities
+
+```{r}
+discount_value <- 0.75
+# Finding number of bi-gram words
+numOfBiGrams <- nrow(bigram_words[by = .(word_1, word_2)])
+
+# Dividing number of times word 2 occurs as second part of bigram, by total number of bigrams.  
+# ( Finding probability for a word given the number of times it was second word of a bigram)
+ckn <- bigram_words[, .(Prob = ((.N) / numOfBiGrams)), by = word_2]
+setkey(ckn, word_2)
+
+# Assigning the probabilities as second word of bigram, to unigrams
+unigram_words[, Prob := ckn[word_1, Prob]]
+unigram_words <- unigram_words[!is.na(unigram_words$Prob)]
+
+# Finding number of times word 1 occurred as word 1 of bi-grams
+n1wi <- bigram_words[, .(N = .N), by = word_1]
+setkey(n1wi, word_1)
+
+# Assigning total times word 1 occured to bigram cn1
+bigram_words[, Cn1 := unigram_words[word_1, count]]
+
+# Kneser Kney Formula
+bigram_words[, Prob := ((count - discount_value) / Cn1 + discount_value / Cn1 * n1wi[word_1, N] * unigram_words[word_2, Prob])]
+
+```
+
+```{r}
+# Finding count of word1-word2 combination in bigram 
+N <- bigram_words[.(word_1, word_2), count]
+trigram_words[, Cn2 := 1:.N]
+
+######## Finding Tri-Gram Probability #################
+
+# Finding count of word1-word2 combination in trigram
+n1w12 <- trigram_words[, .N, by = .(word_1, word_2)]
+setkey(n1w12, word_1, word_2)
+
+# Kneser Kney Algorithm
+trigram_words[, Prob := (count - discount_value) / Cn2 + discount_value / Cn2 * n1w12[.(word_1, word_2), N] * bigram_words[.(word_1, word_2), Prob]]
+
+######## End of Finding Tri-Gram Probability #################
+
+```
+
+```{r}
+# Finding count of word1-word2-word3 combination in trigram
+N <- trigram_words[.(word_1, word_2,word_3), count]
+quadgram_words[, Cn2 := 1:.N]
+
+######## Finding QuadGram Probability #################
+
+# Finding count of word1-word2 combination in trigram
+n1w123 <- quadgram_words[, .N, by = .(word_1, word_2,word_3)]
+setkey(n1w123, word_1, word_2,word_3)
+
+# Kneser Kney Algorithm
+N <- (quadgram_words[['count']] - discount_value) / quadgram_words[['Cn2']] + discount_value / quadgram_words[['Cn2']] * n1w123[.(word_1, word_2,word_3), N] * trigram_words[.(word_1, word_2,word_3), Prob]
+
+quadgram_words[, Prob := 1:.N]
+
+```
+
+
+```{r}
+saveRDS(unigram_words, "unigram_words.RDS")
+saveRDS(bigram_words, "bigram_words.RDS")
+saveRDS(trigram_words, "trigram_words.RDS")
+saveRDS(quadgram_words, "quadgram_wordss.RDS")
+
+unigram_words <- readRDS("unigram_words.RDS")
+bigram_words <- readRDS("bigram_words.RDS")
+trigram_words <- readRDS("trigram_words.RDS")
+quadgram_words <- readRDS("quadgram_wordss.RDS")
+
+```
+
+
+```{r}
+##  tweak the unigram to be used more effectively. Here we single out 50 most occurring unigrams as it is more likely to occur. This will be used as the last resort in backing-off.
+uni_words <- unigram_words[order(-Prob)][1:50]
+
+```
+
+
+## Part III: Shiny App
+
+### Clean the text input
+
+```{r}
+## Google-profanity-words
+profane_words <- read.csv("https://raw.githubusercontent.com/RobertJGabriel/Google-profanity-words/b0431f63daf901eea0bc95f8dcd0298052454974/list.txt")
+profane_words[,1] %>% tail()
+
+```
+
+
+```{r}
+library(textclean)
+
+cleanInput <-function(input) {
+        # 1. Separate words connected with - or /
+        input <- gsub("-", " ", input)
+        input <- gsub("/", " ", input)
+        
+        # 2. Establish end of sentence, abbr, number, email, html
+        input <- gsub("\\? |\\?$|\\! |\\!$", " EEOSS ", input)
+        input <- gsub("[A-Za-z]\\.[A-Za-z]\\.[A-Za-z]\\.[A-Za-z]\\. |[A-Za-z]\\.[A-Za-z]\\.[A-Za-z]\\. |[A-Za-z]\\.[A-Za-z]\\. ", " AABRR ", input)
+        input <- gsub("\\. |\\.$", " EEOSS ", input)
+        input <- gsub("[0-9]+"," NNUMM ",input)
+        input <- gsub("\\S+@\\S+","EEMAILL",input) 
+        input <- gsub("[Hh}ttp([^ ]+)","HHTMLL",input) 
+        input <- gsub("RT | via"," RTVIA ",input) # retweets
+        input <- gsub("@([^ ]+)","ATPPLE",input) # @people
+        input <- gsub("[@][a - zA - Z0 - 9_]{1,15}","UUSRNMSS",input) # usernames
+        
+        # 3. to lower
+        input <- tolower(input)
+        
+        # 4. Remove/replace &, @, 'm, 's, 'are, 'll, etc...
+        input <- gsub(" & ", " and ", input)
+        input <- gsub(" @ ", " at ", input)
+        input <- replace_contraction(input)
+        input <- gsub("'s", "", input) 
+        input <- gsub("haven't", "have not", input)
+        input <- gsub("hadn't", "had not", input)
+        
+        # 5. Remove emoji's, emoticons
+        input <- gsub("[^\x01-\x7F]", "", input)
+        
+        # 6. Remove g, mg, lbs etc; removes all single letters except "a" and "i"
+        
+        input <- gsub(" [1-9]+g ", " ", input) # grams
+        input <- gsub(" [1-9]+mg ", " ", input) # miligrams, etc
+        input <- gsub(" [1-9]+kg ", " ", input)
+        input <- gsub(" [1-9]+lbs ", " ", input)
+        input <- gsub(" [1-9]+s ", " ", input) # seconds, etc
+        input <- gsub(" [1-9]+m ", " ", input)
+        input <- gsub(" [1-9]+h ", " ", input)
+        input <- gsub(" +g ", " ", input) # grams
+        input <- gsub(" +mg ", " ", input) # miligrams, etc
+        input <- gsub(" +kg ", " ", input)
+        input <- gsub(" +lbs ", " ", input)
+        input <- gsub(" +s ", " ", input) # seconds, etc
+        input <- gsub(" +m ", " ", input)
+        input <- gsub(" +h ", " ", input)
+        input <- gsub(" +lbs ", " ", input)
+        input <- gsub(" +kg ", " ", input)
+        
+        # 7. remove punctuation
+        input <- gsub("[^[:alnum:][:space:]\']", "",input)
+        input <- gsub(" '' ", "", input)
+        input <- gsub('"', "", input)
+        input <- gsub("'", "", input)
+        input <- gsub("'", "", input)
+        
+        # 8. remove all single letters except i and a
+        input <- gsub('u', 'you', input)
+        input <- gsub(" [b-hj-z] ", " ", input)
+        
+        # 9. remove profanity
+        input <- removeWords(input, profane_words[,1])
+        
+        # 10. remove extra spaces
+        input <- gsub("^[ ]{1,10}","",input)
+        input <- gsub("[ ]{2,10}"," ",input)
+        input <- stripWhitespace(input)
+        # remove space at end of phrase
+        input <- gsub(" $", "", input)
+        return(input)
+}
+
+```
+
+
+### First the function to predict the fourth word, given three previous words.
+
+
+```{r}
+## Function to return highly probable word given three successive words.
+quadWords <- function(w1, w2,w3,w4, n = 5) {
+        quad_words <- quadgram_words
+        tri_words <- trigram_words
+        bi_words <- bigram_words
+        uni_words <- unigram_words
+    pwords <- quad_words[.(w1, w2,w3,w4)][order(-Prob)]
+    if (any(is.na(pwords)))
+        return(triWords(w1,w2,w3, n))
+    if (nrow(pwords) > n)
+        return(pwords[1:n, word_4])
+    count <- nrow(pwords)
+    twords <- triWords(w1,w2,w3, n)[1:(n - count)]
+    return(c(pwords[, word_4], twords, pwords[, Prob]))
+}
+
+```
+
+
+### Function to return highly probable word given two successive words.
+
+
+```{r}
+triWords <- function(w1, w2,w3, n = 5) {
+        tri_words <- trigram_words
+        bi_words <- bigram_words
+        uni_words <- unigram_words
+    pwords <- tri_words[.(w1, w2, w3)][order(-Prob)]
+    if (any(is.na(pwords)))
+        return(biWords(w1,w2, n))
+    if (nrow(pwords) > n)
+        return(pwords[1:n, word_3])
+    count <- nrow(pwords)
+    bwords <- biWords(w1,w2, n)[1:(n - count)]
+    return(c(pwords[, word_3], bwords, pwords[, Prob]))
+}
+
+```
+
+
+### Function to return highly probable word given one successive word.
+If we don’t find a tri-gram with the two given words, we back-off to the bi-gram. We find the next word given one previous word.
+
+```{r}
+# function to return highly probable previous word given a word
+biWords <- function(w1,w2, n = 5) {
+        bi_words <- bigram_words
+        uni_words <- unigram_words
+    pwords <- bi_words[.(w1, w2)][order(-Prob)]
+    if (any(is.na(pwords)))
+        return(uniWords(n))
+    if (nrow(pwords) > n)
+        return(pwords[1:n, word_2])
+    count <- nrow(pwords)
+    unWords <- uniWords(n)[1:(n - count)]
+    return(c(pwords[, word_2], unWords, pwords[, Prob]))
+}
+
+```
+
+
+### Back to uni-gram
+If we couldn't even find the corresponding bi-gram, we randomly get a word from uni-grams with high probability. This is the last resort for n-grams that are not found in the dataset.
+
+```{r}
+# function to return random words from unigrams
+uniWords <- function(n = 5) {  
+    return(sample(uni_words[, word_1], size = n))
+}
+
+```
+
+### A function to bind all these.
+
+
+```{r}
+# The prediction app
+getWords <- function(str, n=5){
+    require(textclean)
+    require(quanteda)
+    require(tm)
+    str <- cleanInput(str)
+    tokens <- tokens(x = char_tolower(str))
+    tokens <- rev(rev(tokens[[1]])[1:4])
+    
+    words <- quadWords(tokens[1], tokens[2], tokens[3], tokens[4], n)
+    chain_1 <- paste(tokens[1], tokens[2], tokens[3], tokens[4], words[1], sep = " ")
+
+    print(words)
+}
+
+```
+
+
+```{r}
+## testing
+getWords ("I want to eat out")
+
+```
+
+
+### Are you curious about Auto-complete for a word?
+
+```{r}
+###### Auto-complete for word "ab" (Test case)
+
+#filter data frame for rows where column first starts with "ap"
+autocomplete_filtered = quadgram_words[
+                            startsWith(
+                              as.character(quadgram_words$word_1), "ab"), 
+                            c("word_1", "count")]
+
+#Aggregate across duplicate rows
+autocomplete_summary =aggregate(count ~ word_1, autocomplete_filtered, sum)
+
+#Order in descending order of frequency
+autocomplete_ordered = autocomplete_summary[
+                          with(autocomplete_summary, order(-count)), ]
+
+#The predictive auto complete list.
+autocomplete_ordered$word_1
+
+```
+
+
+```{r}
+# The prediction app
+getWords2 <- function(str){
+    require(textclean)
+    require(quanteda)
+    require(tm)
+    str <- cleanInput(str)
+    tokens <- tokens(x = char_tolower(str))
+    tokens <- rev(rev(tokens[[1]])[1:3])
+    
+    autocomplete_filtered = quadgram_words[
+                            startsWith(
+                              as.character(quadgram_words$word_1), str), 
+                            c('word_1', 'count')]
+
+    #Aggregate across duplicate rows
+    autocomplete_summary =aggregate(count ~ word_1, autocomplete_filtered, sum)
+
+    #Order in descending order of frequency
+    autocomplete_ordered = autocomplete_summary[
+                          with(autocomplete_summary, order(-count)), ]
+
+    #The predictive auto complete list.
+    words <- autocomplete_ordered$word_1
+    cnt <- autocomplete_ordered$count
+    table <-  data.frame(Number = seq_along(words), `Predicted Word` = words, Frequency = cnt,
+                         stringsAsFactors = FALSE)
+    print(table)
+}
+
+```
+
+```{r}
+## testing
+getWords2 ('th')
+
+```
